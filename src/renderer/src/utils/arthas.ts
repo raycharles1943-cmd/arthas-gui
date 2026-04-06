@@ -164,4 +164,52 @@ export const arthas = {
 
   stopAll: () => execCommand('stop'),
   reset: (className = '*') => execCommand(`reset ${className}`),
+
+  // ----------------- 新增功能：增强类发现 -----------------
+  
+  // 1. 实时运行时类型分析 - 使用monitor命令捕获实际类型
+  monitorInstanceCreation: (classNamePattern: string) =>
+    execCommand(`monitor -c 1 '${classNamePattern}' '<init>'`),
+  
+  // 2. Spring Bean扫描增强 - 专门针对Spring应用的命令
+  findSpringBeans: (beanName?: string) => {
+    const pattern = beanName ? `*${beanName}*` : '*'
+    return execCommand(`sc -d ${pattern} | grep -E '(@Component|@Service|@Controller|@Repository|@Configuration|@Bean)' || echo "No Spring beans found"`)
+  },
+  
+  // 获取Spring ApplicationContext状态
+  getSpringContextInfo: () =>
+    execCommand(`sc -d org.springframework.context.ApplicationContext`),
+  
+  // 3. 工厂方法追踪 - 追踪特定工厂方法
+  traceFactoryMethod: (factoryClass: string, factoryMethod: string, n = 50) =>
+    execCommand(`trace ${factoryClass} ${factoryMethod} '#cost>0' -n ${n} -x 3`),
+  
+  // 4. 注解分析 - 查找带有特定注解的类
+  findClassesByAnnotation: (annotation: string) =>
+    execCommand(`sc -d *${annotation}*`),
+  
+  // 扫描特定注解的类 (@Service, @Component等)
+  findSpringComponents: (annotationType: 'service' | 'component' | 'controller' | 'repository' | 'configuration') => {
+    const annotations = {
+      service: '@Service',
+      component: '@Component',
+      controller: '@Controller',
+      repository: '@Repository',
+      configuration: '@Configuration'
+    }
+    return execCommand(`sc -d * | grep "${annotations[annotationType]}" || echo "No ${annotationType} found"`)
+  },
+  
+  // 高级类发现：组合多种策略
+  discoverImplementations: (interfaceName: string) =>
+    execCommand(`sc -d *${interfaceName}* | grep -E '(class|interface)' || echo "No implementations found"`),
+  
+  // 堆分析：查找特定类型的实例
+  findInstancesOfType: (className: string) =>
+    execCommand(`heapdump --live --class ${className} || echo "Heap analysis not available"`),
+  
+  // 运行时类加载分析
+  analyzeClassLoading: () =>
+    execCommand(`mbean java.lang:type=ClassLoading`),
 }

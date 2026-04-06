@@ -53,6 +53,62 @@ interface TraceJob {
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
+// 类名缓存管理器
+interface CachedClassName {
+  value: string
+  lastUsed: number
+  successCount: number
+}
+
+const CLASS_CACHE_KEY = 'arthas_gui_cached_class_names'
+
+function getCachedClassNames(): CachedClassName[] {
+  try {
+    const stored = localStorage.getItem(CLASS_CACHE_KEY)
+    return stored ? JSON.parse(stored) : []
+  } catch {
+    return []
+  }
+}
+
+function saveCachedClassNames(classNames: CachedClassName[]) {
+  try {
+    localStorage.setItem(CLASS_CACHE_KEY, JSON.stringify(classNames))
+  } catch {
+    // 忽略存储错误
+  }
+}
+
+function addOrUpdateCachedClassName(className: string, success: boolean = true) {
+  const cached = getCachedClassNames()
+  const existingIndex = cached.findIndex(item => item.value === className)
+  
+  if (existingIndex >= 0) {
+    cached[existingIndex] = {
+      ...cached[existingIndex],
+      lastUsed: Date.now(),
+      successCount: success ? cached[existingIndex].successCount + 1 : cached[existingIndex].successCount
+    }
+  } else {
+    cached.push({
+      value: className,
+      lastUsed: Date.now(),
+      successCount: success ? 1 : 0
+    })
+  }
+  
+  // 按最后使用时间排序（最新的在前），并限制最多保存20个
+  cached.sort((a, b) => b.lastUsed - a.lastUsed)
+  const limited = cached.slice(0, 20)
+  saveCachedClassNames(limited)
+}
+
+function removeCachedClassName(className: string) {
+  const cached = getCachedClassNames()
+  const filtered = cached.filter(item => item.value !== className)
+  saveCachedClassNames(filtered)
+}
+
 function isBusinessClass(className: string): boolean {
   const jdkPrefixes = [
     'java.', 'javax.', 'sun.', 'com.sun.',
@@ -485,6 +541,10 @@ export function RequestMonitor() {
   const logEndRef = useRef<HTMLDivElement>(null)
   const profilingStartTimeRef = useRef<number>(0)
   
+  // 缓存类名状态
+  const [cachedClassNames, setCachedClassNames] = useState<CachedClassName[]>([])
+  const [showClassDropdown, setShowClassDropdown] = useState(false)
+  
   // 筛选状态
   const [filters, setFilters] = useState({
     className: '',
@@ -496,6 +556,12 @@ export function RequestMonitor() {
   })
   const [showFilterPanel, setShowFilterPanel] = useState(false)
 
+  // 初始化缓存
+  useEffect(() => {
+    const cached = getCachedClassNames()
+    setCachedClassNames(cached)
+  }, [])
+
   // 自动滚动到日志底部
   useEffect(() => {
     if (logEndRef.current) {
@@ -503,18 +569,23 @@ export function RequestMonitor() {
     }
   }, [log])
 
-  // 点击外部关闭筛选面板
+  // 点击外部关闭筛选面板和类名下拉
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as HTMLElement
+      
       if (showFilterPanel && !target.closest('.filter-panel-container')) {
         setShowFilterPanel(false)
+      }
+      
+      if (showClassDropdown && !target.closest('.class-dropdown-container')) {
+        setShowClassDropdown(false)
       }
     }
 
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [showFilterPanel])
+  }, [showFilterPanel, showClassDropdown])
 
   // 筛选函数
   const filterNode = (node: ProfilerNode): ProfilerNode | null => {
@@ -832,6 +903,12 @@ export function RequestMonitor() {
       const doneMsg = `✅ 完成: ${tree.calls} 次根调用 | 监控了 ${discovery.allClasses.length} 个类 | 总计耗时: ${totalTimeSec}s`
       setProgress(doneMsg)
       appendLog(`\n${doneMsg}`)
+      
+      // 保存成功的类名到缓存
+      if (className.trim()) {
+        addOrUpdateCachedClassName(className.trim(), true)
+        setCachedClassNames(getCachedClassNames())
+      }
     } catch (err: any) {
       console.error('[Profiler] ❌', err)
       const totalTimeMs = Date.now() - profilingStartTimeRef.current
@@ -840,6 +917,12 @@ export function RequestMonitor() {
       setError(msg)
       appendLog(`\n❌ ${msg}`)
       setProgress('失败')
+      
+      // 保存失败的类名到缓存（但不增加成功次数）
+      if (className.trim()) {
+        addOrUpdateCachedClassName(className.trim(), false)
+        setCachedClassNames(getCachedClassNames())
+      }
     } finally {
       setIsProfiling(false)
     }
@@ -850,6 +933,12 @@ export function RequestMonitor() {
     const totalTimeMs = Date.now() - profilingStartTimeRef.current
     const totalTimeSec = (totalTimeMs / 1000).toFixed(1)
     appendLog(`\n🛑 用户手动停止 | 总计耗时: ${totalTimeSec}s`)
+    
+    // 保存手动停止的类名到缓存
+    if (className.trim()) {
+      addOrUpdateCachedClassName(className.trim(), false) // 手动停止不算成功
+      setCachedClassNames(getCachedClassNames())
+    }
   }
 
   return (
@@ -862,17 +951,109 @@ export function RequestMonitor() {
         </div>
 
         <div className="space-y-4">
-          <div>
+          <div className="relative">
             <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">
               Target Class
             </label>
-            <input
-              className="w-full pl-3 pr-3 py-2 text-sm bg-[#3c3c3c] border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none mt-1"
-              placeholder="com.example.service.OrderService"
-              value={className}
-              onChange={e => setClassName(e.target.value)}
-              disabled={isProfiling}
-            />
+            <div className="relative mt-1 class-dropdown-container">
+              <input
+                className="w-full pl-3 pr-10 py-2 text-sm bg-[#3c3c3c] border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="com.example.service.OrderService"
+                value={className}
+                onChange={e => {
+                  setClassName(e.target.value)
+                  if (e.target.value.trim() && !showClassDropdown) {
+                    setShowClassDropdown(true)
+                  }
+                }}
+                onFocus={() => {
+                  if (className.trim() || cachedClassNames.length > 0) {
+                    setShowClassDropdown(true)
+                  }
+                }}
+                disabled={isProfiling}
+              />
+              <button
+                onClick={() => setShowClassDropdown(!showClassDropdown)}
+                disabled={isProfiling}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white disabled:opacity-50"
+              >
+                {showClassDropdown ? '▲' : '▼'}
+              </button>
+              
+              {showClassDropdown && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-[#2d2d2d] border border-gray-700 rounded-lg shadow-lg z-40 max-h-60 overflow-y-auto">
+                  {className.trim() && !cachedClassNames.some(c => c.value === className.trim()) && (
+                    <div className="border-b border-gray-700">
+                      <button
+                        onClick={() => {
+                          setClassName(className.trim())
+                          setShowClassDropdown(false)
+                        }}
+                        className="w-full px-3 py-2 text-left text-sm text-blue-400 hover:bg-white/5 flex items-center gap-2"
+                      >
+                        <span className="text-xs">➕</span>
+                        输入新类: {className.trim()}
+                      </button>
+                    </div>
+                  )}
+                  
+                  {cachedClassNames.length > 0 ? (
+                    cachedClassNames.map((cached, index) => (
+                      <div key={cached.value} className={`${index > 0 ? 'border-t border-gray-700' : ''}`}>
+                        <button
+                          onClick={() => {
+                            setClassName(cached.value)
+                            setShowClassDropdown(false)
+                          }}
+                          className="w-full px-3 py-2 text-left text-sm text-gray-300 hover:bg-white/5 flex items-center justify-between"
+                        >
+                          <div className="truncate flex-1 text-left" title={cached.value}>
+                            {cached.value}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0 ml-2">
+                            {cached.successCount > 0 && (
+                              <span className="text-[10px] text-green-400 bg-green-900/30 px-1 py-0.5 rounded">
+                                ✓{cached.successCount}
+                              </span>
+                            )}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                removeCachedClassName(cached.value)
+                                setCachedClassNames(getCachedClassNames())
+                              }}
+                              className="text-[10px] text-gray-500 hover:text-red-400 p-0.5"
+                              title="从缓存中删除"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="px-3 py-4 text-center text-gray-500 text-sm">
+                      暂无历史记录
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="text-[10px] text-gray-500 mt-1 ml-1 flex justify-between">
+              <span>支持手动输入或从下拉选择</span>
+              {cachedClassNames.length > 0 && (
+                <button
+                  onClick={() => {
+                    saveCachedClassNames([])
+                    setCachedClassNames([])
+                  }}
+                  className="text-red-400 hover:text-red-300"
+                >
+                  清空历史
+                </button>
+              )}
+            </div>
           </div>
 
           <div>

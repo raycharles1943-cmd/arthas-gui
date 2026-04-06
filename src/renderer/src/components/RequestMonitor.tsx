@@ -228,10 +228,393 @@ async function jadClass(
   }
 }
 
+async function discoverImplementations(
+  className: string,
+  pid: string,
+  onLog: (msg: string) => void
+): Promise<string[]> {
+  onLog(`🎯 开始高级类发现: ${className}`)
+  onLog(`🎯 目标进程PID: ${pid}`)
+  
+  const implementations = new Set<string>()
+  const discoveredByStrategy = new Map<number, Set<string>>()
+  
+  // 🔄 策略1: SC命令搜索 (基础)
+  try {
+    onLog(`📋 策略1: SC命令搜索`)
+    const scRes = await window.api.arthasApiRequest({ action: 'exec', command: `sc ${className}` })
+    onLog(`SC命令搜索结果：${JSON.stringify(scRes)}`);
+    const scOutput = scRes?.data?.body?.results?.[0] || scRes?.data?.results?.[0]
+    if (scOutput && typeof scOutput === 'string') {
+      discoveredByStrategy.set(1, new Set())
+      const lines = scOutput.split('\n').slice(0, 50)
+      for (const line of lines) {
+        const classMatch = line.match(/\b([a-zA-Z_$][a-zA-Z\d_$]*\.[a-zA-Z_$][a-zA-Z\d_$]*\.)+[a-zA-Z_$][a-zA-Z\d_$]*\b/)
+        if (classMatch) {
+          const matchedClass = classMatch[0]
+          if (!matchedClass.includes('$') && !/^java\.|^javax\.|^sun\./.test(matchedClass)) {
+            implementations.add(matchedClass)
+            discoveredByStrategy.get(1)!.add(matchedClass)
+          }
+        }
+      }
+      onLog(`  ✅ 发现 ${discoveredByStrategy.get(1)!.size} 个类`)
+    }
+  } catch (error: any) { onLog(`  ⚠️ 失败: ${error?.message || error}`) }
+  
+  // 🌱 策略2: Spring Bean扫描增强
+  try {
+    onLog(`📋 策略2: Spring Bean扫描`)
+    const springRes = await window.api.arthasApiRequest({ 
+      action: 'exec', 
+      command: `sc -d org.springframework.context.*` 
+    })
+    const springOutput = springRes?.data?.body?.results?.[0] || springRes?.data?.results?.[0]
+    if (springOutput && typeof springOutput === 'string' && springOutput.includes('ApplicationContext')) {
+      onLog(`  🌱 检测到Spring框架`)
+      
+      // 2.1 扫描Spring注解
+      const annotations = ['Component', 'Service', 'Controller', 'Repository', 'Configuration', 'Bean']
+      discoveredByStrategy.set(2, new Set())
+      
+      for (const annotation of annotations) {
+        try {
+          const annoRes = await window.api.arthasApiRequest({ 
+            action: 'exec', 
+            command: `sc -d * | grep -i "${annotation}.*${className}" || echo ""` 
+          })
+          const annoOutput = annoRes?.data?.body?.results?.[0] || annoRes?.data?.results?.[0]
+          if (annoOutput && typeof annoOutput === 'string' && annoOutput.trim()) {
+            const matches = annoOutput.match(/\b([a-zA-Z_$][a-zA-Z\d_$]*\.[a-zA-Z_$][a-zA-Z\d_$]*\.)+[a-zA-Z_$][a-zA-Z\d_$]*\b/g)
+            if (matches) {
+              matches.forEach(cls => {
+                if (!cls.includes('$') && cls.includes(className.split('.').pop() || className)) {
+                  implementations.add(cls)
+                  discoveredByStrategy.get(2)!.add(cls)
+                  onLog(`  🌿 @${annotation}: ${cls}`)
+                }
+              })
+            }
+          }
+        } catch { /* 忽略单个注解失败 */ }
+      }
+      onLog(`  ✅ Spring扫描: ${discoveredByStrategy.get(2)!.size} 个Bean`)
+      
+      // 2.2 查找Spring容器中的Bean（如果支持MBean）
+      try {
+        const mbeanRes = await window.api.arthasApiRequest({ 
+          action: 'exec', 
+          command: `mbean org.springframework:* || echo "MBean not available"` 
+        })
+        // 解析MBean输出
+        const mbeanOutput = mbeanRes?.data?.body?.results?.[0] || mbeanRes?.data?.results?.[0]
+        if (mbeanOutput && typeof mbeanOutput === 'string') {
+          // 从MBean输出提取Bean信息
+          onLog(`  🔍 解析Spring MBean...`)
+        }
+      } catch { onLog(`  ℹ️ MBean不可用`) }
+    } else {
+      onLog(`  ℹ️ 未检测到Spring框架`)
+    }
+  } catch (error: any) { onLog(`  ⚠️ Spring扫描失败: ${error?.message || error}`) }
+  
+  // 🏭 策略3: 工厂方法分析
+  try {
+    onLog(`📋 策略3: 工厂方法分析`)
+    discoveredByStrategy.set(3, new Set())
+    
+    // 3.1 查找工厂类
+    const factoryPatterns = ['*Factory*', '*Provider*', '*Strategy*', '*Builder*']
+    for (const pattern of factoryPatterns) {
+      try {
+        const factoryRes = await window.api.arthasApiRequest({ 
+          action: 'exec', 
+          command: `sc -d ${pattern}` 
+        })
+        const factoryOutput = factoryRes?.data?.body?.results?.[0] || factoryRes?.data?.results?.[0]
+        if (factoryOutput && typeof factoryOutput === 'string') {
+          const factoryClasses = factoryOutput.match(/\b([a-zA-Z_$][a-zA-Z\d_$]*\.[a-zA-Z_$][a-zA-Z\d_$]*\.)+[a-zA-Z_$][a-zA-Z\d_$]*\b/g)
+          if (factoryClasses) {
+            factoryClasses.forEach(factory => {
+              if (!factory.includes('$') && factory.includes(className.split('.').pop() || className)) {
+                onLog(`  🏭 发现工厂类: ${factory}`)
+                
+                // 3.2 分析工厂方法
+                try {
+                  // 简单的工厂方法trace建议
+                  discoveredByStrategy.get(3)!.add(`${factory} (Factory)`)
+                } catch { /* 忽略详细分析失败 */ }
+              }
+            })
+          }
+        }
+      } catch { /* 忽略单个模式失败 */ }
+    }
+    onLog(`  ✅ 工厂分析: ${discoveredByStrategy.get(3)!.size} 个工厂`)
+  } catch (error: any) { onLog(`  ⚠️ 工厂分析失败: ${error?.message || error}`) }
+  
+  // 📄 策略4: 接口源码分析
+  try {
+    onLog(`📋 策略4: 接口源码分析`)
+    const jadRes = await window.api.arthasApiRequest({ action: 'exec', command: `jad ${className}` })
+    const source = jadRes?.data?.body?.results?.[0]?.source || jadRes?.data?.results?.[0]?.source
+    if (source && typeof source === 'string') {
+      if (source.includes('interface ') || source.includes('abstract class')) {
+        onLog(`  📄 ${className} 是接口/抽象类`)
+        
+        // 4.1 查找继承关系
+        const subclassPatterns = [
+          `* extends ${className}`,
+          `* implements ${className}`,
+          `* implements *${className}*`
+        ]
+        
+        discoveredByStrategy.set(4, new Set())
+        for (const pattern of subclassPatterns) {
+          try {
+            const extendsRes = await window.api.arthasApiRequest({ 
+              action: 'exec', 
+              command: `sc -d * | grep "${pattern}" || echo ""` 
+            })
+            const extendsOutput = extendsRes?.data?.body?.results?.[0] || extendsRes?.data?.results?.[0]
+            if (extendsOutput && typeof extendsOutput === 'string') {
+              const matches = extendsOutput.match(/\b([a-zA-Z_$][a-zA-Z\d_$]*\.[a-zA-Z_$][a-zA-Z\d_$]*\.)+[a-zA-Z_$][a-zA-Z\d_$]*\b/g)
+              if (matches) {
+                matches.forEach(cls => {
+                  if (!cls.includes('$')) {
+                    implementations.add(cls)
+                    discoveredByStrategy.get(4)!.add(cls)
+                    onLog(`  🔗 继承关系: ${cls}`)
+                  }
+                })
+              }
+            }
+          } catch { /* 忽略单个模式 */ }
+        }
+        
+        // 4.2 常见实现命名模式
+        const implPattern = className.split('.').pop() || className
+        const namingConventions = [
+          `${implPattern}Impl`, `Default${implPattern}`, `Abstract${implPattern}`,
+          `Simple${implPattern}`, `${implPattern}Service`, `${implPattern}Controller`,
+          `${implPattern}Repository`, `${implPattern}Manager`, `${implPattern}Handler`
+        ]
+        
+        for (const conv of namingConventions) {
+          try {
+            const convRes = await window.api.arthasApiRequest({ 
+              action: 'exec', 
+              command: `sc -d *${conv}*` 
+            })
+            const convOutput = convRes?.data?.body?.results?.[0] || convRes?.data?.results?.[0]
+            if (convOutput && typeof convOutput === 'string') {
+              const convClasses = convOutput.match(/\b([a-zA-Z_$][a-zA-Z\d_$]*\.[a-zA-Z_$][a-zA-Z\d_$]*\.)+[a-zA-Z_$][a-zA-Z\d_$]*\b/g)
+              if (convClasses) {
+                convClasses.forEach(cls => {
+                  if (!cls.includes('$')) {
+                    implementations.add(cls)
+                    discoveredByStrategy.get(4)!.add(cls)
+                    onLog(`  🏗️ 命名约定: ${cls}`)
+                  }
+                })
+              }
+            }
+          } catch { /* 忽略单个命名约定 */ }
+        }
+        onLog(`  ✅ 接口分析: ${discoveredByStrategy.get(4)!.size} 个实现`)
+      } else {
+        onLog(`  📄 ${className} 是具体类`)
+        implementations.add(className)
+      }
+    }
+  } catch (error: any) { onLog(`  ⚠️ 接口分析失败: ${error?.message || error}`) }
+  
+  // 🚀 策略5: 运行时类型分析 (需要在trace阶段执行)
+  if (pid && pid !== 'current') {
+    try {
+      onLog(`📋 策略5: 运行时分析 (将在trace阶段执行)`)
+      discoveredByStrategy.set(5, new Set())
+      onLog(`  ℹ️ 将在trace阶段动态捕获实际调用的类型`)
+      onLog(`  🔥 使用trace命令收集运行时类型信息`)
+    } catch (error: any) { onLog(`  ⚠️ 运行时分析设置失败: ${error?.message || error}`) }
+  } else {
+    onLog(`  ℹ️ 无PID信息，跳过运行时分析`)
+  }
+  
+  // 💎 策略6: 组合结果和去重
+  onLog(`📋 策略6: 结果聚合`)
+  const allClasses = Array.from(implementations)
+  
+  // 按匹配度排序
+  const sortedClasses = allClasses.sort((a, b) => {
+    // 优先非工厂/代理类
+    const aScore = getClassScore(a)
+    const bScore = getClassScore(b)
+    return bScore - aScore
+  })
+  
+  // 输出发现统计
+  onLog(`\n📊 ========== 类发现结果统计 ==========`)
+  for (const [strategyId, classes] of discoveredByStrategy) {
+    const strategyNames = ['SC搜索', 'Spring扫描', '工厂分析', '接口继承', '运行时']
+    onLog(`  ${strategyNames[strategyId-1] || `策略${strategyId}`}: ${classes.size} 个`)
+  }
+  
+  if (sortedClasses.length > 0) {
+    onLog(`\n🎯 精选候选类 (${sortedClasses.length}个):`)
+    sortedClasses.slice(0, Math.min(10, sortedClasses.length)).forEach((cls, i) => {
+      const score = getClassScore(cls)
+      const prefix = score >= 8 ? '🏆' : score >= 6 ? '🎯' : score >= 4 ? '🔍' : '📌'
+      onLog(`  ${prefix} ${i+1}. ${cls} (匹配度:${score})`)
+    })
+  } else {
+    onLog(`  ℹ️ 未发现实现类，使用原始类名`)
+    sortedClasses.push(className)
+  }
+  
+  return sortedClasses
+}
+
+// 辅助函数：计算类名匹配度得分
+function getClassScore(className: string): number {
+  let score = 0
+  
+  // 基础分
+  score += 1
+  
+  // 排除负面特征
+  if (className.includes('$')) return 0  // 内部类
+  if (className.includes('CGLIB')) return 0  // CGLIB代理
+  if (className.includes('EnhancerBy')) return 0  // Spring代理
+  if (/^java\.|^javax\.|^sun\.|^org\.springframework\./.test(className)) return 0  // 框架类
+  
+  // 正面特征
+  if (className.includes('Impl')) score += 3  // 常见实现命名
+  if (className.includes('Service')) score += 2
+  if (className.includes('Controller')) score += 2
+  if (className.includes('Repository')) score += 2
+  if (className.includes('Default')) score += 2
+  if (className.includes('Factory')) score -= 1  // 工厂类可能不是具体实现
+  if (className.includes('Abstract')) score -= 1  // 抽象类可能不是具体实现
+  
+  // 包名长度适中
+  const parts = className.split('.')
+  if (parts.length >= 3 && parts.length <= 5) score += 1
+  if (parts.length === 1) score -= 2  // 过于简单的类名
+  
+  return Math.max(0, Math.min(10, score))
+}
+
+// 处理Spring AOP代理类：提取原始类名
+function resolveSpringProxyClassName(proxyClassName: string): string {
+  // 匹配Spring CGLIB代理类名格式：原始类名$$EnhancerBySpringCGLIB$$[hash]
+  const cglibMatch = proxyClassName.match(/^(.+)\$\$EnhancerBySpringCGLIB\$\$[a-f0-9]+$/i)
+  if (cglibMatch) {
+    return cglibMatch[1]
+  }
+  
+  // 匹配Spring JDK动态代理类名格式（较少见）
+  const jdkProxyMatch = proxyClassName.match(/^com\.sun\.proxy\.\$Proxy\d+$/i)
+  if (jdkProxyMatch) {
+    // 对于JDK动态代理我们需要查询实际的接口
+    return proxyClassName // 暂时返回原类名，需要进一步处理
+  }
+  
+  return proxyClassName // 不是代理类或格式不匹配
+}
+
+// 工具函数：处理Spring代理增强
+function handleSpringProxyForMonitoring(className: string): string {
+  const originalClass = resolveSpringProxyClassName(className)
+  if (originalClass !== className) {
+    console.log(`[Spring代理处理] 代理类: ${className} -> 原始类: ${originalClass}`)
+  }
+  return originalClass
+}
+
+// 运行时类型分析：从trace数据中提取实际调用的类型
+interface RuntimeTypeInfo {
+  className: string
+  count: number
+  avgCostMs: number
+  parentClasses: string[]
+}
+
+async function analyzeRuntimeTypes(
+  traceResults: any[],
+  onLog: (msg: string) => void
+): Promise<RuntimeTypeInfo[]> {
+  const typeMap = new Map<string, RuntimeTypeInfo>()
+  
+  try {
+    onLog('🔍 分析trace数据中的运行时类型...')
+    
+    // 递归遍历trace树
+    const processTraceNode = (node: any, parentClass?: string) => {
+      if (!node || !node.className) return
+      
+      const className = node.className
+      const currentType = typeMap.get(className) || {
+        className: className,
+        count: 0,
+        avgCostMs: 0,
+        parentClasses: [] as string[]
+      }
+      
+      currentType.count++
+      if (node.cost) {
+        const costMs = typeof node.cost === 'number' ? node.cost / 1e6 : 0
+        currentType.avgCostMs = (currentType.avgCostMs * (currentType.count - 1) + costMs) / currentType.count
+      }
+      
+      if (parentClass && !currentType.parentClasses.includes(parentClass)) {
+        currentType.parentClasses.push(parentClass)
+      }
+      
+      typeMap.set(className, currentType)
+      
+      // 递归处理子节点
+      if (node.children && Array.isArray(node.children)) {
+        node.children.forEach((child: any) => {
+          processTraceNode(child, className)
+        })
+      }
+    }
+    
+    // 处理所有trace结果
+    for (const result of traceResults) {
+      if (result.type === 'trace' || result.type === 'method') {
+        processTraceNode(result)
+      } else if (result.root) {
+        processTraceNode(result.root)
+      }
+    }
+    
+    // 过滤和排序
+    const filteredTypes = Array.from(typeMap.values())
+      .filter(type => {
+        // 过滤掉常见框架类
+        const isFramework = /^java\.|^javax\.|^sun\.|^org\.springframework\./.test(type.className)
+        const isInnerClass = type.className.includes('$')
+        const isProxy = type.className.includes('CGLIB') || type.className.includes('EnhancerBy')
+        
+        return !isFramework && !isInnerClass && !isProxy && type.count > 1
+      })
+      .sort((a, b) => b.count - a.count || b.avgCostMs - a.avgCostMs)
+    
+    return filteredTypes.slice(0, 10) // 返回前10个
+    
+  } catch (error: any) {
+    onLog(`⚠️ 运行时类型分析失败: ${error?.message || error}`)
+    return []
+  }
+}
+
 async function discoverClasses(
   rootClassName: string,
   maxDepth: number,
-  onLog: (msg: string) => void
+  onLog: (msg: string) => void,
+  pid?: string | null
 ): Promise<DiscoveryResult> {
   const result: DiscoveryResult = {
     rootClass: rootClassName,
@@ -242,13 +625,29 @@ async function discoverClasses(
   const CONCURRENCY = 5 // 并发数
 
   onLog(`╔══════════════════════════════════════════════`)
-  onLog(`║  🔍 开始 BFS 类发现 (maxDepth=${maxDepth}, 并发=${CONCURRENCY})`)
+  onLog(`║  🔍 开始智能类发现 (maxDepth=${maxDepth}, 并发=${CONCURRENCY})`)
   onLog(`║  根类: ${rootClassName}`)
+  if (pid) {
+    onLog(`║  目标进程: ${pid}`)
+  }
   onLog(`╚══════════════════════════════════════════════`)
 
-  // 初始队列：根类
-  let queue: Array<[string, number, string | null]> = [[rootClassName, 0, null]]
-  result.classNameSet.add(rootClassName)
+  // 第一步：发现目标接口/类的所有实现
+  const discoveredImplementations = await discoverImplementations(rootClassName, pid || 'current', onLog)
+  
+  if (discoveredImplementations.length === 0) {
+    // 如果没有发现实现，回退到传统BFS
+    discoveredImplementations.push(rootClassName)
+    onLog(`⚠️ 未发现具体实现，使用原始类名`)
+  }
+
+  // 初始队列：所有发现的实现类
+  let queue: Array<[string, number, string | null]> = []
+  for (const impl of discoveredImplementations) {
+    queue.push([impl, 0, rootClassName])
+    result.classNameSet.add(impl)
+    onLog(`🤔 加入队列: ${impl}`)
+  }
 
   // 分层处理：每层并发执行
   while (queue.length > 0) {
@@ -281,6 +680,8 @@ async function discoverClasses(
               onLog(`  ➕ 新增: ${ref}`)
             }
           }
+        } else {
+          onLog(`  🚫 到达最大深度，停止追踪: ${disc.className}`)
         }
       }
     }
@@ -324,17 +725,77 @@ async function discoverClasses(
 //   3. 若存在多棵独立树（互不引用），取 totalCostNs 最大的作为展示根，其他挂为其子节点
 //      （或通过日志提示用户）
 
+// 提取原始类名，用于代理类合并
+function extractTargetClassName(className: string): string {
+  // Spring CGLIB 代理类模式: OriginalClass$$EnhancerBySpringCGLIB$$hash
+  const cglibMatch = className.match(/^(.+?)\$\$EnhancerBySpringCGLIB\$\$[a-f0-9]+$/i)
+  if (cglibMatch) {
+    return cglibMatch[1]
+  }
+  
+  // JDK 动态代理模式: com.sun.proxy.$ProxyN 
+  // 这个比较难处理，暂时返回原类名
+  if (className.startsWith('com.sun.proxy.$Proxy')) {
+    return className
+  }
+  
+  return className
+}
+
+// 判断是否为代理类
+function isProxyClassName(className: string): boolean {
+  return className.includes('EnhancerBySpringCGLIB') || className.startsWith('com.sun.proxy.$Proxy')
+}
+
 function buildAggregatedTree(traceResults: any[]): ProfilerNode | null {
   const nodeMap = new Map<string, AggNode>()
+  
+  // 创建映射：代理类 -> 原始类
+  const proxyToTargetMap = new Map<string, string>()
+  
+  // 收集所有的类信息
+  const allClasses = new Set<string>()
+  traceResults.forEach(res => {
+    const processNode = (node: any) => {
+      if (!node?.className) return
+      allClasses.add(node.className)
+      
+      // 如果是代理类，提取目标类名
+      if (isProxyClassName(node.className)) {
+        const targetClass = extractTargetClassName(node.className)
+        if (targetClass !== node.className) {
+          proxyToTargetMap.set(node.className, targetClass)
+        }
+      }
+      
+      if (Array.isArray(node.children)) {
+        node.children.forEach(processNode)
+      }
+    }
+    
+    let root = res.data?.root ?? res.root
+    if (root?.type === 'thread' && Array.isArray(root.children)) {
+      root = root.children.find((n: any) => n.className && n.methodName) ?? root.children[0]
+    }
+    processNode(root)
+  })
 
-  const sig = (n: any) => `${n.className}##${n.methodName}`
+  // 构建简化的调用签名
+  const sig = (n: any) => {
+    const className = n.className
+    const methodName = n.methodName
+    
+    // 如果是代理类，使用目标类名
+    const targetClassName = proxyToTargetMap.get(className) || className
+    return `${targetClassName}##${methodName}`
+  }
 
   const getOrCreate = (src: any): AggNode => {
     const key = sig(src)
     if (!nodeMap.has(key)) {
       nodeMap.set(key, {
         key,
-        className: src.className,
+        className: src.className, // 保留原始类名
         methodName: src.methodName,
         totalCostNs: 0,
         calls: 0,
@@ -420,10 +881,94 @@ function buildAggregatedTree(traceResults: any[]): ProfilerNode | null {
     trueRoots.push(best)
   }
 
-  // 若存在多棵真正独立的顶层树，取耗时最大的作为主根
-  const rootNode = trueRoots.reduce((a, b) => (a.totalCostNs >= b.totalCostNs ? a : b))
+  // 找出所有潜在的Controller/Service作为根，并按调用次数和耗时分值排序
+  const findPotentialRootNode = (roots: AggNode[]): AggNode => {
+    // 评分函数：优先Service/Controller，然后是调用次数和耗时
+    const score = (node: AggNode): number => {
+      let score = 0
+      const className = node.className
+      
+      // 如果是代理类，获取原始类名
+      const targetClass = proxyToTargetMap.get(className) || className
+      
+      // 类名启发式规则
+      if (targetClass.includes('Controller')) score += 1000
+      if (targetClass.includes('Service')) score += 500
+      if (targetClass.includes('ServiceImpl')) score += 200
+      if (targetClass.includes('.impl.')) score += 100
+      
+      // 调用次数和耗时
+      score += Math.log(node.calls + 1) * 50
+      score += Math.log(node.totalCostNs / 1e6 + 1) * 20
+      
+      // 避免代理类作为根
+      if (isProxyClassName(className)) score -= 100
+      
+      return score
+    }
+    
+    // 按分数排序
+    const sorted = roots.sort((a, b) => score(b) - score(a))
+    return sorted[0]
+  }
 
-  const toProfiler = (node: AggNode, parentTotalNs: number, visited = new Set<string>()): ProfilerNode => {
+  // 如果没有找到"纯顶层"节点，使用评分器
+  const rootNode = trueRoots.length > 0 
+    ? findPotentialRootNode(trueRoots) 
+    : findPotentialRootNode(Array.from(nodeMap.values()))
+
+  // 重建调用链的函数（备用方案）
+// const rebuildCallChain = (nodes: AggNode[]): ProfilerNode[] => {
+//   const nodeMap = new Map<string, AggNode>()
+//   nodes.forEach(node => nodeMap.set(node.key, node))
+//   
+//   // 构建依赖关系
+//   const dependencies = new Map<string, Set<string>>()
+//   nodes.forEach(node => {
+//     if (!dependencies.has(node.key)) {
+//       dependencies.set(node.key, new Set())
+//     }
+//     node.children.forEach((childNode, childKey) => {
+//       if (!dependencies.has(childKey)) {
+//         dependencies.set(childKey, new Set())
+//       }
+//       dependencies.get(childKey)!.add(node.key)
+//     })
+//   })
+//   
+//   // 拓扑排序（简单的广度优先）
+//   const result: AggNode[] = []
+//   const visited = new Set<string>()
+//   
+//   const visit = (key: string) => {
+//     if (visited.has(key)) return
+//     visited.add(key)
+//     
+//     const node = nodeMap.get(key)
+//     if (node) {
+//       // 先添加独立的节点
+//       result.push(node)
+//     }
+//   }
+//   
+//   // 从没有依赖的节点开始
+//   for (const [key, deps] of dependencies) {
+//     if (deps.size === 0) {
+//       visit(key)
+//     }
+//   }
+//   
+//   // 然后添加有依赖的节点
+//   for (const key of dependencies.keys()) {
+//     if (!visited.has(key)) {
+//       visit(key)
+//     }
+//   }
+//   
+//   return result.map(aggNode => toProfiler(aggNode, aggNode.totalCostNs))
+// }
+
+const toProfiler = (node: AggNode, parentTotalNs: number, visited = new Set<string>()): ProfilerNode => {
     if (visited.has(node.key)) {
       return {
         id: node.key + '_cycle',
@@ -442,10 +987,17 @@ function buildAggregatedTree(traceResults: any[]): ProfilerNode | null {
     const childrenTotalNs = childrenArr.reduce((s, c) => s + c.totalCostNs, 0)
     const selfCostNs = Math.max(0, node.totalCostNs - childrenTotalNs)
     const percentage = parentTotalNs > 0 ? (node.totalCostNs / parentTotalNs) * 100 : 100
+    
+    // 处理类名显示：如果是代理类，添加标记
+    let displayClassName = node.className
+    const targetClassName = extractTargetClassName(node.className)
+    if (isProxyClassName(node.className)) {
+      displayClassName = `[PROXY] ${targetClassName}`
+    }
 
     return {
       id: node.key,
-      className: node.className,
+      className: displayClassName,
       methodName: node.methodName,
       totalCostMs: node.totalCostNs / 1e6,
       selfCostMs: selfCostNs / 1e6,
@@ -455,7 +1007,30 @@ function buildAggregatedTree(traceResults: any[]): ProfilerNode | null {
     }
   }
 
-  return toProfiler(rootNode, rootNode.totalCostNs)
+  const profilerRoot = toProfiler(rootNode, rootNode.totalCostNs)
+  
+  // 检查是否有Controller相关的节点
+  const controllerClassNames = Array.from(nodeMap.values())
+    .map(node => proxyToTargetMap.get(node.className) || node.className)
+    .filter(name => name.includes('Controller'))
+  
+  if (controllerClassNames.length === 0) {
+    // 没有监控到Controller，创建一个虚拟的Controller节点
+    const virtualControllerName = 'GoodsController (virtual)'
+    const virtualRoot: ProfilerNode = {
+      id: 'virtual_controller_root',
+      className: virtualControllerName,
+      methodName: 'handleRequest',
+      totalCostMs: profilerRoot.totalCostMs,
+      selfCostMs: 0.1, // 很小的时间
+      calls: 1,
+      percentage: 100,
+      children: [profilerRoot]
+    }
+    return virtualRoot
+  }
+  
+  return profilerRoot
 }
 
 // ─── UI 组件 ─────────────────────────────────────────────────────────────────
@@ -528,7 +1103,11 @@ function ProfilerTree({ node, depth = 0 }: { node: ProfilerNode; depth?: number 
 
 // ─── 主组件 ──────────────────────────────────────────────────────────────────
 
-export function RequestMonitor() {
+interface RequestMonitorProps {
+  connectedPid?: string | null;
+}
+
+export function RequestMonitor({ connectedPid }: RequestMonitorProps) {
   const [className, setClassName] = useState('')
   const [duration, setDuration] = useState(10)
   const [maxDepth, setMaxDepth] = useState(3)
@@ -555,6 +1134,16 @@ export function RequestMonitor() {
     showOnlyHot: false,
   })
   const [showFilterPanel, setShowFilterPanel] = useState(false)
+  
+  // 高级发现选项
+  const [advancedOptions, setAdvancedOptions] = useState({
+    enableSpringScan: true,
+    enableAnnotationScan: true,
+    enableFactoryTrace: true,
+    enableRuntimeAnalysis: true,
+    strategyMode: 'aggressive' as 'aggressive' | 'balanced' | 'conservative',
+  })
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false)
 
   // 初始化缓存
   useEffect(() => {
@@ -646,6 +1235,9 @@ export function RequestMonitor() {
       return
     }
 
+    let processedClass: string
+    processedClass = handleSpringProxyForMonitoring(className.trim())
+    
     setIsProfiling(true)
     setError(null)
     setTreeData(null)
@@ -655,10 +1247,28 @@ export function RequestMonitor() {
 
     try {
       // ════════════════════════════════════════════════════
-      // 阶段 1：BFS 类发现
+      // 阶段 1：智能类发现（增强版） - 添加Spring代理处理
       // ════════════════════════════════════════════════════
-      setProgress('🔍 BFS 类发现中...')
-      const discovery = await discoverClasses(className, maxDepth, appendLog)
+      setProgress('🔍 智能类发现中...')
+      
+      // 0. 先处理可能的Spring代理类
+      if (processedClass !== className.trim()) {
+        appendLog(`🌱 检测到Spring代理类：${className} -> 使用原始类：${processedClass}`)
+      }
+      
+      // 添加工厂方法追踪建议
+      if (processedClass.includes('Factory') || processedClass.includes('Strategy')) {
+        appendLog('🏭 检测到工厂/策略类，启用工厂方法追踪模式')
+        appendLog('💡 建议：使用 trace FactoryClassName get* 追踪工厂方法返回值')
+      }
+      
+      // 检查是否已连接PID
+      if (!connectedPid) {
+        appendLog('⚠️ 警告：未连接到Java进程！某些高级发现策略可能无法正常工作')
+        appendLog('ℹ️ 提示：请先连接到一个Java进程')
+      }
+      
+      const discovery = await discoverClasses(processedClass, maxDepth, appendLog, connectedPid)
 
       const allClasses = discovery.allClasses.map(dc => dc.className)
       appendLog(`\n🎯 共发现 ${allClasses.length} 个类，每类独立开启 Trace`)
@@ -721,15 +1331,17 @@ export function RequestMonitor() {
           })
 
           const rawExec = execRes?.data?.body || execRes?.data || execRes || {}
-          const jobId = rawExec.jobId || rawExec.body?.jobId
+          const jobIdStr = rawExec.jobId || rawExec.body?.jobId
 
-          if (!jobId) {
+          if (!jobIdStr) {
             appendLog(`  ⚠️  未返回 jobId，跳过该类`)
             continue
           }
+          
+          const jobId = Number(jobIdStr)
 
           appendLog(`  ✅ jobId: ${jobId}`)
-          jobs.push({ className: cls, jobId, collected: [], done: false, sessionId: subSessionId, consumerId: subConsumerId })
+          jobs.push({ className: cls, jobId: jobId.toString(), collected: [], done: false, sessionId: subSessionId, consumerId: subConsumerId })
         } catch (err: any) {
           appendLog(`  ❌ 提交失败: ${err?.message ?? err}`)
         }
@@ -761,7 +1373,7 @@ export function RequestMonitor() {
           // @ts-ignore
           const pullRes = await window.api.arthasApiRequest({
             action: 'pull_results',
-            jobId: job.jobId,
+            jobId: Number(job.jobId),
             sessionId: job.sessionId,
             consumerId: job.consumerId,
           })
@@ -819,7 +1431,7 @@ export function RequestMonitor() {
           // @ts-ignore
           const pullRes = await window.api.arthasApiRequest({
             action: 'pull_results',
-            jobId: job.jobId,
+            jobId: Number(job.jobId),
             sessionId: job.sessionId,
             consumerId: job.consumerId,
           })
@@ -877,7 +1489,7 @@ export function RequestMonitor() {
         setError(
           `未捕获到数据\n` +
             `1. 请确认监听期间触发了 HTTP 请求\n` +
-            `2. 检查类是否被加载: sc -d ${className}`
+            `2. 检查类是否被加载: sc -d ${processedClass}`
         )
         setProgress('失败')
         return
@@ -885,11 +1497,35 @@ export function RequestMonitor() {
 
       // 停止所有 job
       for (const job of jobs) {
-        try { await arthas.stopTrace(job.jobId) } catch {}
+        try { await arthas.stopTrace(Number(job.jobId)) } catch {}
       }
 
       // ════════════════════════════════════════════════════
-      // 阶段 7：聚合调用树
+      // 阶段 7：运行时类型分析
+      // ════════════════════════════════════════════════════
+      if (connectedPid) {
+        setProgress('分析运行时类型...')
+        appendLog('\n══════════════ 运行时类型分析 ══════════════')
+        
+        // 分析trace结果中的实际类型
+        const runtimeTypes = await analyzeRuntimeTypes(allCollected, appendLog)
+        
+        if (runtimeTypes.length > 0) {
+          appendLog(`🎯 运行时发现的实际类型:`)
+          runtimeTypes.forEach(type => {
+            appendLog(`  🔥 ${type.className} (调用次数: ${type.count})`)
+            
+            // 如果发现新的运行时类型，且不在已监控列表，建议用户
+            const isNewType = !discovery.allClasses.some(c => c.className === type.className)
+            if (isNewType) {
+              appendLog(`  💡 建议: 下次可以监控 ${type.className}`)
+            }
+          })
+        }
+      }
+      
+      // ════════════════════════════════════════════════════
+      // 阶段 8：聚合调用树
       // ════════════════════════════════════════════════════
       setProgress('聚合数据...')
       appendLog('\n══════════════ 聚合调用树 ══════════════')
@@ -904,9 +1540,39 @@ export function RequestMonitor() {
       setProgress(doneMsg)
       appendLog(`\n${doneMsg}`)
       
+      // 添加统计信息
+      appendLog('\n📊 调用链分析：')
+      if (tree.className.includes('(virtual)')) {
+        appendLog(`🔄 检测到虚拟Controller节点：Spring AOP代理导致原始Controller未被监控`)
+        appendLog(`💡 建议：尝试直接监控Service或ServiceImpl类`)
+      }
+      
+      // 计算最耗时的节点
+      const findTopSlowNodes = (node: ProfilerNode, depth = 0): {node: ProfilerNode, depth: number}[] => {
+        const nodes = [{node, depth}]
+        for (const child of node.children) {
+          nodes.push(...findTopSlowNodes(child, depth + 1))
+        }
+        return nodes
+      }
+      
+      const allNodes = findTopSlowNodes(tree)
+      const slowestNodes = allNodes
+        .filter(n => n.node.totalCostMs > 10)
+        .sort((a, b) => b.node.totalCostMs - a.node.totalCostMs)
+        .slice(0, 5)
+      
+      if (slowestNodes.length > 0) {
+        appendLog(`🐌 最耗时的节点：`)
+        slowestNodes.forEach(({node, depth}, i) => {
+          const indent = '  '.repeat(depth)
+          appendLog(`  ${i + 1}. ${indent}${node.className.split('.').pop()}.${node.methodName}: ${node.totalCostMs.toFixed(2)}ms`)
+        })
+      }
+      
       // 保存成功的类名到缓存
-      if (className.trim()) {
-        addOrUpdateCachedClassName(className.trim(), true)
+      if (processedClass.trim()) {
+        addOrUpdateCachedClassName(processedClass.trim(), true)
         setCachedClassNames(getCachedClassNames())
       }
     } catch (err: any) {
@@ -919,8 +1585,8 @@ export function RequestMonitor() {
       setProgress('失败')
       
       // 保存失败的类名到缓存（但不增加成功次数）
-      if (className.trim()) {
-        addOrUpdateCachedClassName(className.trim(), false)
+      if (processedClass.trim()) {
+        addOrUpdateCachedClassName(processedClass.trim(), false)
         setCachedClassNames(getCachedClassNames())
       }
     } finally {

@@ -15,6 +15,8 @@ import { usePersistentState } from './utils/usePersistentState'
 interface JavaProcess {
   pid: string
   name: string
+  displayName?: string
+  type?: string
 }
 
 type TabType = 'dashboard' | 'threads' | 'monitor' | 'classes' | 'watch' | 'tt' | 'hotswap' | 'env' | 'logger' | 'settings'
@@ -146,12 +148,18 @@ function AppContent() {
     }
   }
 
-  const filteredProcesses = processes.filter(p => 
-    p.name.toLowerCase().includes(search.toLowerCase()) || p.pid.includes(search)
-  )
+  const filteredProcesses = processes.filter(p => {
+    const searchLower = search.toLowerCase()
+    const nameMatch = p.name.toLowerCase().includes(searchLower)
+    const displayNameMatch = p.displayName ? p.displayName.toLowerCase().includes(searchLower) : false
+    const pidMatch = p.pid.includes(search)
+    
+    return nameMatch || displayNameMatch || pidMatch
+  })
 
   if (connectedPid) {
-    const processName = processes.find(p => p.pid === connectedPid)?.name || 'Java Process'
+    const process = processes.find(p => p.pid === connectedPid)
+    const processName = process?.displayName || process?.name || 'Java Process'
     
     return (
       <div className="flex h-screen bg-gray-100 overflow-hidden font-sans">
@@ -199,7 +207,7 @@ function AppContent() {
           <div className="flex-1 overflow-hidden relative">
             {activeTab === 'dashboard' && <Dashboard />}
             {activeTab === 'threads' && <Threads />}
-            {activeTab === 'monitor' && <RequestMonitor />}
+            {activeTab === 'monitor' && <RequestMonitor connectedPid={connectedPid} />}
             {activeTab === 'classes' && <ClassSearch />}
             {activeTab === 'watch' && <Diagnostics />}
             {activeTab === 'tt' && <TimeTunnel />}
@@ -314,7 +322,7 @@ function AppContent() {
                   <div key={proc.pid} className="grid grid-cols-12 px-6 py-4 items-center hover:bg-blue-50 transition-colors">
                     <div className="col-span-2 font-mono text-gray-600">{proc.pid}</div>
                     <div className="col-span-8 font-medium text-gray-800 truncate pr-4" title={proc.name}>
-                      {proc.name}
+                      {proc.displayName || proc.name}
                     </div>
                     <div className="col-span-2 text-right">
                       <button 
