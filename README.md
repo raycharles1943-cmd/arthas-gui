@@ -325,7 +325,7 @@ const translations = {
 
 ## 📄 许可证
 
-本项目基于 [MIT License](LICENSE) 开源协议。
+本项目基于 [Apache License 2.0](LICENSE) 开源协议。
 
 ## 🙏 致谢
 
